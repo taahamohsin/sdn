@@ -483,6 +483,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
     /**
      * Ensure bidirectional connectivity between all hosts.
      * This method ensures that for each pair of hosts, both can reach each other.
+     * ASSUMPTION: the topology is always a connected graph
      */
     private void ensureBidirectionalConnectivity() {
         log.info("Ensuring bidirectional connectivity between all hosts");
@@ -763,28 +764,35 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
      * @param device information about the host
      */
 	@Override
-	public void deviceMoved(IDevice device)
-	{
+	public void deviceMoved(IDevice device) {
 		Host host = this.knownHosts.get(device);
-		if (null == host)
-		{
+		if (null == host) {
 			host = new Host(device, this.floodlightProv);
 			this.knownHosts.put(device, host);
 		}
-
-		if (!host.isAttachedToSwitch())
-		{
+		if (!host.isAttachedToSwitch()) {
 			this.deviceRemoved(device);
 			return;
 		}
 		log.info(String.format("Host %s moved to s%d:%d", host.getName(),
-				host.getSwitch().getId(), host.getPort()));
+			host.getSwitch().getId(), host.getPort()));
 
-		// Update routing: change rules to route to host
 		removeHostRules(host);
 		installHostRules(host);
 
-		// Ensure bidirectional connectivity with all other hosts
+		for (IOFSwitch sw : getSwitches().values()) {
+			// Remove existing fallback rule
+			OFMatch match = new OFMatch();
+			SwitchCommands.removeRules(sw, this.table, match);
+
+			// Install new fallback rule
+			List<OFAction> actions = new ArrayList<OFAction>();
+			actions.add(new OFActionOutput((short) OFPort.OFPP_FLOOD.getValue()));
+			List<OFInstruction> instructions = new ArrayList<OFInstruction>();
+			instructions.add(new OFInstructionApplyActions(actions));
+			SwitchCommands.installRule(sw, this.table, (short)(SwitchCommands.MIN_PRIORITY + 1), match, instructions);
+		}
+
 		ensureBidirectionalConnectivity();
 	}
 
@@ -793,14 +801,17 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
      * @param DPID for the switch
      */
 	@Override
-	public void switchAdded(long switchId)
-	{
+	public void switchAdded(long switchId) {
 		IOFSwitch sw = this.floodlightProv.getSwitch(switchId);
 		log.info(String.format("Switch s%d added", switchId));
-
-		// Update routing: change routing rules for all hosts
 		installDefaultRules(sw);
-		updateAllHostRules();
+
+		OFMatch match = new OFMatch();
+		List<OFAction> actions = new ArrayList<OFAction>();
+		actions.add(new OFActionOutput((short) OFPort.OFPP_FLOOD.getValue()));
+		List<OFInstruction> instructions = new ArrayList<OFInstruction>();
+		instructions.add(new OFInstructionApplyActions(actions));
+		SwitchCommands.installRule(sw, this.table, (short)(SwitchCommands.MIN_PRIORITY + 1), match, instructions);
 	}
 
 	/**
@@ -822,28 +833,20 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 	 * @param updateList information about the change in each link's state
 	 */
 	@Override
-	public void linkDiscoveryUpdate(List<LDUpdate> updateList)
-	{
-		for (LDUpdate update : updateList)
-		{
-			// If we only know the switch & port for one end of the link, then
-			// the link must be from a switch to a host
-			if (0 == update.getDst())
-			{
-				log.info(String.format("Link s%s:%d -> host updated",
-					update.getSrc(), update.getSrcPort()));
-			}
-			// Otherwise, the link is between two switches
-			else
-			{
-				log.info(String.format("Link s%s:%d -> %s:%d updated",
-					update.getSrc(), update.getSrcPort(),
-					update.getDst(), update.getDstPort()));
-			}
+	public void linkDiscoveryUpdate(List<LDUpdate> updateList) {
+		for (LDUpdate update : updateList) {
+			log.info(String.format("Link update: s%s:%d <-> s%s:%d",
+				update.getSrc(), update.getSrcPort(), update.getDst(), update.getDstPort()));
 		}
-
-		// Update routing: change routing rules for all hosts
-		updateAllHostRules();
+		for (IOFSwitch sw : getSwitches().values()) {
+			OFMatch match = new OFMatch();
+			SwitchCommands.removeRules(sw, this.table, match);
+			List<OFAction> actions = new ArrayList<OFAction>();
+			actions.add(new OFActionOutput((short) OFPort.OFPP_FLOOD.getValue()));
+			List<OFInstruction> instructions = new ArrayList<OFInstruction>();
+			instructions.add(new OFInstructionApplyActions(actions));
+			SwitchCommands.installRule(sw, this.table, (short)(SwitchCommands.MIN_PRIORITY + 1), match, instructions);
+		}
 	}
 
 	/**
@@ -859,25 +862,25 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
      * @param device information about the host
      */
     @Override
-    public void deviceIPV4AddrChanged(IDevice device)
-    {
-        Host host = new Host(device, this.floodlightProv);
-        this.knownHosts.put(device, host);
-
-        if (host.getIPv4Address() != null) {
-            log.info("deviceIPV4AddrChanged triggered for device: " + device.getMACAddressString());
-            log.info("IPv4 address is: " + Arrays.toString(device.getIPv4Addresses()));
-
-            log.info("deviceIPV4AddrChanged: Installing rules for " + host.getName());
-            removeHostRules(host);
-            installHostRules(host);
-
-            // Ensure bidirectional connectivity with all other hosts
-            ensureBidirectionalConnectivity();
-        } else {
-            log.info("deviceIPV4AddrChanged: IP address still null for " + host.getName());
-        }
-    }
+	public void deviceIPV4AddrChanged(IDevice device) {
+		Host host = new Host(device, this.floodlightProv);
+		this.knownHosts.put(device, host);
+		if (host.getIPv4Address() != null) {
+			log.info("deviceIPV4AddrChanged: Installing rules for " + host.getName());
+			removeHostRules(host);
+			installHostRules(host);
+			for (IOFSwitch sw : getSwitches().values()) {
+				OFMatch match = new OFMatch();
+				SwitchCommands.removeRules(sw, this.table, match);
+				List<OFAction> actions = new ArrayList<OFAction>();
+				actions.add(new OFActionOutput((short) OFPort.OFPP_FLOOD.getValue()));
+				List<OFInstruction> instructions = new ArrayList<OFInstruction>();
+				instructions.add(new OFInstructionApplyActions(actions));
+				SwitchCommands.installRule(sw, this.table, (short)(SwitchCommands.MIN_PRIORITY + 1), match, instructions);
+			}
+			ensureBidirectionalConnectivity();
+		}
+	}
 
 
 
