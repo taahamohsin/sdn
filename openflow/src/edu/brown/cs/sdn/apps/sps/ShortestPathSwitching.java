@@ -16,7 +16,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.openflow.protocol.OFMatch;
+import org.openflow.protocol.OFMessage;
+import org.openflow.protocol.OFPacketIn;
 import org.openflow.protocol.OFPort;
+import org.openflow.protocol.OFType;
 import org.openflow.protocol.action.OFAction;
 import org.openflow.protocol.action.OFActionOutput;
 import org.openflow.protocol.instruction.OFInstruction;
@@ -24,8 +27,9 @@ import org.openflow.protocol.instruction.OFInstructionApplyActions;
 
 import edu.brown.cs.sdn.apps.util.Host;
 import edu.brown.cs.sdn.apps.util.SwitchCommands;
-
+import net.floodlightcontroller.core.FloodlightContext;
 import net.floodlightcontroller.core.IFloodlightProviderService;
+import net.floodlightcontroller.core.IOFMessageListener;
 import net.floodlightcontroller.core.IOFSwitch;
 import net.floodlightcontroller.core.IOFSwitch.PortChangeType;
 import net.floodlightcontroller.core.IOFSwitchListener;
@@ -125,6 +129,36 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
                 installHostRules(host);
             }
         }
+
+        this.floodlightProv.addOFMessageListener(OFType.PACKET_IN, new IOFMessageListener() {
+        @Override
+        public String getName() {
+            return "ShortestPathSwitchingInlineLogger";
+        }
+
+        @Override
+        public boolean isCallbackOrderingPrereq(OFType type, String name) {
+            return false;
+        }
+
+        @Override
+        public boolean isCallbackOrderingPostreq(OFType type, String name) {
+            return false;
+        }
+
+        @Override
+        public net.floodlightcontroller.core.IListener.Command receive(
+            IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
+
+            if (msg.getType() == OFType.PACKET_IN) {
+                Ethernet eth = IFloodlightProviderService.bcStore.get(
+                    cntx, IFloodlightProviderService.CONTEXT_PI_PAYLOAD);
+                System.out.println("[SPS Table 1 Logger] PACKET_IN: " + eth.toString());
+            }
+            return Command.CONTINUE;
+        }
+    });
+
     }
 
     /**
@@ -612,10 +646,8 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         OFMatch matchArp = new OFMatch();
         matchArp.setDataLayerType(Ethernet.TYPE_ARP);
 
-        OFAction actionArp = new OFActionOutput(OFPort.OFPP_CONTROLLER.getValue());
         List<OFAction> arpActions = new ArrayList<OFAction>();
-        arpActions.add(actionArp);
-
+        arpActions.add(new OFActionOutput(OFPort.OFPP_CONTROLLER.getValue()));
         OFInstructionApplyActions arpInstruction = new OFInstructionApplyActions(arpActions);
         List<OFInstruction> arpInstructions = new ArrayList<OFInstruction>();
         arpInstructions.add(arpInstruction);
@@ -623,16 +655,15 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         SwitchCommands.installRule(
                 sw,
                 this.table,
-                SwitchCommands.MAX_PRIORITY, // highest
+                SwitchCommands.MAX_PRIORITY, // Highest priority for ARP
                 matchArp,
                 arpInstructions);
 
-        // Rule 2: Fallback FLOOD (middle priority)
-        OFMatch matchFlood = new OFMatch(); // matches everything
-        OFAction floodAction = new OFActionOutput((short) OFPort.OFPP_FLOOD.getValue());
-        List<OFAction> floodActions = new ArrayList<OFAction>();
-        floodActions.add(floodAction);
+        // Rule 2: Flood all unmatched packets (lowest priority fallback)
+        OFMatch matchAll = new OFMatch(); // Match everything
 
+        List<OFAction> floodActions = new ArrayList<OFAction>();
+        floodActions.add(new OFActionOutput((short) OFPort.OFPP_FLOOD.getValue()));
         OFInstructionApplyActions floodInstruction = new OFInstructionApplyActions(floodActions);
         List<OFInstruction> floodInstructions = new ArrayList<OFInstruction>();
         floodInstructions.add(floodInstruction);
@@ -640,26 +671,9 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         SwitchCommands.installRule(
                 sw,
                 this.table,
-                (short) (SwitchCommands.MIN_PRIORITY + 1), // middle
-                matchFlood,
+                SwitchCommands.MIN_PRIORITY, // Lower than any module-specific rules
+                matchAll,
                 floodInstructions);
-
-        // Rule 3: Final fallback → Controller (lowest priority)
-        OFMatch matchDefault = new OFMatch(); // same wildcard match
-        OFAction ctrlAction = new OFActionOutput(OFPort.OFPP_CONTROLLER.getValue());
-        List<OFAction> ctrlActions = new ArrayList<OFAction>();
-        ctrlActions.add(ctrlAction);
-
-        OFInstructionApplyActions ctrlInstruction = new OFInstructionApplyActions(ctrlActions);
-        List<OFInstruction> ctrlInstructions = new ArrayList<OFInstruction>();
-        ctrlInstructions.add(ctrlInstruction);
-
-        SwitchCommands.installRule(
-                sw,
-                this.table,
-                SwitchCommands.MIN_PRIORITY, // lowest
-                matchDefault,
-                ctrlInstructions);
     }
 
     /**
