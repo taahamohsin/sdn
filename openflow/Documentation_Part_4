@@ -1,0 +1,54 @@
+**Report: Part 4 - Distributed Load Balancer**
+
+**1. Introduction**
+This report outlines the design and implementation of a Distributed Load Balancer application developed for the Floodlight SDN controller. The objective of this application is to transparently distribute incoming TCP connections across multiple backend servers by rewriting packet headers and maintaining consistent flow rules.
+
+**2. Related Work**
+Conventional load balancers like HAProxy operate at Layer 4 or Layer 7, typically deployed as middleboxes. In SDN, load balancing logic can be embedded directly into the controller to utilize global topology awareness and reduce unnecessary hops or bottlenecks.
+
+**3. Architecture**
+The `LoadBalancer` module is installed in OpenFlow Table 0 and operates in conjunction with the Layer-3 Routing module in Table 1. The architecture comprises:
+
+* A virtual IP and MAC that clients connect to
+* A round-robin backend host selector
+* Per-connection rule installation
+* Header rewriting logic to map virtual IPs to real hosts
+* Integration with ARP and TCP handling logic
+
+**4. Algorithms and Logic**
+
+* **ARP Handling**: When a client sends an ARP request for the virtual IP, the controller replies with the configured virtual MAC.
+* **TCP SYN Interception**: For new connections (TCP SYN), the controller selects a backend server using round-robin and installs bidirectional flow rules.
+* **Packet Rewriting**: Installed rules rewrite destination IP and MAC on client→server flows, and source IP/MAC on server→client flows.
+* **Idle Timeout**: Each connection-specific rule has a 20-second idle timeout to manage rule table space.
+* **TCP Reset**: Non-SYN packets sent to a virtual IP that don’t match an existing flow rule are replied to with a TCP RST to maintain connection integrity.
+
+**5. Implementation**
+The application is implemented across the following Java files:
+
+* `LoadBalancer.java`: Main logic for packet-in handling, ARP replies, SYN interception, and rule installation.
+* `LoadBalancerInstance.java`: Helper class for managing virtual IPs, MACs, and backend IPs using round-robin.
+* `loadbalancer.prop`: Configuration file defining instances and table assignments.
+
+It uses Floodlight services for packet inspection (`OFPacketIn`), rule definition (`OFMatch`, `OFActionSetField`), and interaction with the topology and device services.
+
+**6. Results**
+The load balancer was tested with Mininet and a virtual IP serving two backend servers. Evaluation metrics included:
+
+* Round-robin distribution of TCP connections
+* Correct ARP replies with virtual MAC
+* Proper header rewriting on both client→server and server→client flows
+* Timeout-based rule removal
+
+Using tools like `curl` and `tcpdump`, it was verified that clients transparently accessed backend servers via the virtual IP, without being aware of backend addresses.
+
+**7. Conclusion**
+This SDN-based load balancer efficiently distributes TCP connections with minimal overhead and maintains flow consistency using dynamic rule installation. It eliminates the need for external hardware and offers flexibility for integrating with other SDN applications like routing and firewalls.
+
+**8. Future Work**
+Enhancements may include:
+
+* Load-aware selection strategies instead of round-robin
+* Layer-7 (application-aware) load balancing
+* Health checking of backend servers
+* Integration with dynamic scaling modules
