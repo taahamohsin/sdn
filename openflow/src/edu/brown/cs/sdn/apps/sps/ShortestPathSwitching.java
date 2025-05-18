@@ -131,33 +131,33 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         }
 
         this.floodlightProv.addOFMessageListener(OFType.PACKET_IN, new IOFMessageListener() {
-        @Override
-        public String getName() {
-            return "ShortestPathSwitchingInlineLogger";
-        }
-
-        @Override
-        public boolean isCallbackOrderingPrereq(OFType type, String name) {
-            return false;
-        }
-
-        @Override
-        public boolean isCallbackOrderingPostreq(OFType type, String name) {
-            return false;
-        }
-
-        @Override
-        public net.floodlightcontroller.core.IListener.Command receive(
-            IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
-
-            if (msg.getType() == OFType.PACKET_IN) {
-                Ethernet eth = IFloodlightProviderService.bcStore.get(
-                    cntx, IFloodlightProviderService.CONTEXT_PI_PAYLOAD);
-                System.out.println("[SPS Table 1 Logger] PACKET_IN: " + eth.toString());
+            @Override
+            public String getName() {
+                return "ShortestPathSwitchingInlineLogger";
             }
-            return Command.CONTINUE;
-        }
-    });
+
+            @Override
+            public boolean isCallbackOrderingPrereq(OFType type, String name) {
+                return false;
+            }
+
+            @Override
+            public boolean isCallbackOrderingPostreq(OFType type, String name) {
+                return false;
+            }
+
+            @Override
+            public net.floodlightcontroller.core.IListener.Command receive(
+                    IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
+
+                if (msg.getType() == OFType.PACKET_IN) {
+                    Ethernet eth = IFloodlightProviderService.bcStore.get(
+                            cntx, IFloodlightProviderService.CONTEXT_PI_PAYLOAD);
+                    System.out.println("[SPS Table 1 Logger] PACKET_IN: " + eth.toString());
+                }
+                return Command.CONTINUE;
+            }
+        });
 
     }
 
@@ -298,8 +298,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
      * @return true if rules were successfully installed, false otherwise
      */
     private boolean installHostRules(Host host) {
-        // Skip if host is not attached to a switch
-        if (!host.isAttachedToSwitch()) {
+        if (!host.isAttachedToSwitch()) { // Skip if host is not attached to a switch
             log.warn("Host " + host.getName() + " is not attached to a switch, skipping rule installation");
             return false;
         }
@@ -634,28 +633,23 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         }
     }
 
-    /**
-     * Install default rules on a switch:
-     * 1. Send all unmatched packets to flood (lowest priority)
-     *
-     * @param sw the switch to install default rules on
-     */
-    private void installDefaultRules(IOFSwitch sw) {
-        // Rule: Flood all unmatched packets (lowest priority fallback)
-        OFMatch matchAll = new OFMatch(); // Match everything
+    // Temporary rule to support ARP/initial discovery until hosts are identified
+    private void installBootstrapDiscoveryRule(IOFSwitch sw) {
+        OFMatch match = new OFMatch();
 
-        List<OFAction> floodActions = new ArrayList<OFAction>();
-        floodActions.add(new OFActionOutput((short) OFPort.OFPP_FLOOD.getValue()));
-        OFInstructionApplyActions floodInstruction = new OFInstructionApplyActions(floodActions);
-        List<OFInstruction> floodInstructions = new ArrayList<OFInstruction>();
-        floodInstructions.add(floodInstruction);
+        List<OFAction> actions = new ArrayList<OFAction>();
+        actions.add(new OFActionOutput((short) 0xfffb));
+
+        OFInstructionApplyActions instruction = new OFInstructionApplyActions(actions);
+        List<OFInstruction> instructions = new ArrayList<OFInstruction>();
+        instructions.add(instruction);
 
         SwitchCommands.installRule(
                 sw,
                 this.table,
-                SwitchCommands.MIN_PRIORITY, // Lower than any module-specific rules
-                matchAll,
-                floodInstructions);
+                SwitchCommands.MIN_PRIORITY,
+                match,
+                instructions);
     }
 
     /**
@@ -762,9 +756,6 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         removeHostRules(host);
         installHostRules(host);
 
-        IOFSwitch sw = host.getSwitch();
-        installDefaultRules(sw); // Only this one call now
-
         ensureBidirectionalConnectivity();
     }
 
@@ -778,7 +769,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         IOFSwitch sw = this.floodlightProv.getSwitch(switchId);
         log.info(String.format("Switch s%d added", switchId));
 
-        installDefaultRules(sw);
+        installBootstrapDiscoveryRule(sw);
     }
 
     /**
@@ -788,7 +779,6 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
      */
     @Override
     public void switchRemoved(long switchId) {
-        IOFSwitch sw = this.floodlightProv.getSwitch(switchId);
         log.info(String.format("Switch s%d removed", switchId));
 
         // Update routing: change routing rules for all hosts
@@ -808,11 +798,6 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         }
 
         updateAllHostRules(); // Refresh routing
-
-        // Reinstall default rules (includes ARP, FLOOD, controller fallback)
-        for (IOFSwitch sw : getSwitches().values()) {
-            installDefaultRules(sw);
-        }
     }
 
     /**
@@ -840,9 +825,6 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 
             removeHostRules(host);
             installHostRules(host);
-
-            IOFSwitch sw = host.getSwitch();
-            installDefaultRules(sw); // Already includes flood
 
             // Ensure all hosts can reach this one and vice versa
             for (Host other : getHosts()) {
