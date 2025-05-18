@@ -1,4 +1,4 @@
-package edu.brown.cs.sdn.apps.sps;
+package edu.nyu.cs.sdn.apps.sps;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -15,19 +15,16 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import edu.nyu.cs.sdn.apps.util.Host;
+import edu.nyu.cs.sdn.apps.util.SwitchCommands;
+
 import org.openflow.protocol.OFMatch;
-import org.openflow.protocol.OFMessage;
-import org.openflow.protocol.OFType;
 import org.openflow.protocol.action.OFAction;
 import org.openflow.protocol.action.OFActionOutput;
 import org.openflow.protocol.instruction.OFInstruction;
 import org.openflow.protocol.instruction.OFInstructionApplyActions;
 
-import edu.brown.cs.sdn.apps.util.Host;
-import edu.brown.cs.sdn.apps.util.SwitchCommands;
-import net.floodlightcontroller.core.FloodlightContext;
 import net.floodlightcontroller.core.IFloodlightProviderService;
-import net.floodlightcontroller.core.IOFMessageListener;
 import net.floodlightcontroller.core.IOFSwitch;
 import net.floodlightcontroller.core.IOFSwitch.PortChangeType;
 import net.floodlightcontroller.core.IOFSwitchListener;

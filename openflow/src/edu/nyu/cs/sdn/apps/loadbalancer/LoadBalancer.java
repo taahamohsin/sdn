@@ -1,4 +1,4 @@
-package edu.brown.cs.sdn.apps.loadbalancer;
+package edu.nyu.cs.sdn.apps.loadbalancer;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -24,9 +24,8 @@ import org.openflow.protocol.action.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import edu.brown.cs.sdn.apps.util.ArpServer;
-import edu.brown.cs.sdn.apps.util.SwitchCommands;
-
+import edu.nyu.cs.sdn.apps.util.ArpServer;
+import edu.nyu.cs.sdn.apps.util.SwitchCommands;
 import net.floodlightcontroller.core.FloodlightContext;
 import net.floodlightcontroller.core.IFloodlightProviderService;
 import net.floodlightcontroller.core.IOFMessageListener;
@@ -110,13 +109,6 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 		this.floodlightProv = context.getServiceImpl(
 				IFloodlightProviderService.class);
 		this.deviceProv = context.getServiceImpl(IDeviceService.class);
-
-		// this.l3RoutingApp = context.getServiceImpl(IL3Routing.class);
-
-		/*********************************************************************/
-		/* TODO: Initialize other class variables, if necessary */
-
-		/*********************************************************************/
 	}
 
 	/**
@@ -129,13 +121,6 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 		this.floodlightProv.addOFSwitchListener(this);
 		this.floodlightProv.addOFMessageListener(OFType.PACKET_IN, this);
 		log.info("Load balancer initialized with " + this.instances.size() + " virtual IP(s).");
-
-		System.out.println("LoadBalancer.startUp() completed - listening for ARP and TCP packets");
-
-		/*********************************************************************/
-		/* TODO: Perform other tasks, if necessary */
-
-		/*********************************************************************/
 	}
 
 	/**
@@ -149,68 +134,49 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 		log.info(String.format("Switch s%d added", switchId));
 
 		for (Integer vip : this.instances.keySet()) {
-			log.info(String.format("Installing rules for VIP %s", IPv4.fromIPv4Address(vip)));
+			System.out.println("Installing ARP rule for VIP: " + IPv4.fromIPv4Address(vip));
+			System.out.println("Installing TCP rule for VIP: " + IPv4.fromIPv4Address(vip));
 
-			// ARP rule - match ANY ARP packet
+			// ARP packets → controller (match *all* ARP requests, not filtered by IP)
 			OFMatch matchArp = new OFMatch();
-			matchArp.setDataLayerType(Ethernet.TYPE_ARP);
-			log.info("Created ARP match: " + matchArp.toString());
+			matchArp.setDataLayerType(Ethernet.TYPE_ARP); // DO NOT setNetworkDestination()
 
 			List<OFAction> arpActions = new ArrayList<OFAction>();
 			arpActions.add(new OFActionOutput(OFPort.OFPP_CONTROLLER.getValue()));
-			log.info("ARP action: send to controller (port " + OFPort.OFPP_CONTROLLER.getValue() + ")");
 
 			List<OFInstruction> arpInstrs = new ArrayList<OFInstruction>();
 			arpInstrs.add(new OFInstructionApplyActions(arpActions));
 
-			boolean success = SwitchCommands.installRule(
-				sw,
-				this.table,
-				SwitchCommands.MAX_PRIORITY,
-				matchArp,
-				arpInstrs);
+			SwitchCommands.installRule(sw, this.table, SwitchCommands.MAX_PRIORITY, matchArp, arpInstrs);
 
-			log.info("ARP rule installation " + (success ? "succeeded" : "failed"));
-
-			// TCP rule - match TCP packets to VIP
+			// TCP to VIP → controller and goto_table 1
 			OFMatch matchTcp = new OFMatch();
 			matchTcp.setDataLayerType(Ethernet.TYPE_IPv4);
 			matchTcp.setNetworkProtocol(IPv4.PROTOCOL_TCP);
 			matchTcp.setNetworkDestination(vip);
-			log.info("Created TCP match: " + matchTcp.toString());
 
 			List<OFAction> tcpActions = new ArrayList<OFAction>();
 			tcpActions.add(new OFActionOutput(OFPort.OFPP_CONTROLLER.getValue()));
 
 			List<OFInstruction> tcpInstrs = new ArrayList<OFInstruction>();
 			tcpInstrs.add(new OFInstructionApplyActions(tcpActions));
-			tcpInstrs.add(new OFInstructionGotoTable((byte)(this.table + 1)));
+			tcpInstrs.add(new OFInstructionGotoTable((byte) (this.table + 1)));
 
-			success = SwitchCommands.installRule(
-				sw,
-				this.table,
-				(short)(SwitchCommands.MAX_PRIORITY - 1),
-				matchTcp,
-				tcpInstrs,
-				(short)0,  // hard timeout
-				(short)0); // idle timeout
-
-			log.info("TCP rule installation " + (success ? "succeeded" : "failed"));
+			SwitchCommands.installRule(
+					sw,
+					this.table,
+					(short) (SwitchCommands.MAX_PRIORITY - 1),
+					matchTcp,
+					tcpInstrs,
+					(short) 0, // hard timeout
+					(short) 0); // idle timeout
 		}
 
-		// Default rule - send to table 1
+		// Default fallthrough rule to forward to table 1 (ShortestPathSwitching)
 		OFMatch matchAll = new OFMatch();
 		List<OFInstruction> passInstrs = new ArrayList<OFInstruction>();
-		passInstrs.add(new OFInstructionGotoTable((byte)(this.table + 1)));
-
-		boolean success = SwitchCommands.installRule(
-			sw,
-			this.table,
-			SwitchCommands.MIN_PRIORITY,
-			matchAll,
-			passInstrs);
-
-		log.info("Default rule installation " + (success ? "succeeded" : "failed"));
+		passInstrs.add(new OFInstructionGotoTable((byte) (this.table + 1)));
+		SwitchCommands.installRule(sw, this.table, SwitchCommands.MIN_PRIORITY, matchAll, passInstrs);
 	}
 
 	private void installConnectionRules(IOFSwitch sw,
@@ -397,7 +363,9 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 	 */
 	@Override
 	public boolean isCallbackOrderingPrereq(OFType type, String name) {
-		return false;
+		return (OFType.PACKET_IN == type
+				&& (name.equals(ArpServer.MODULE_NAME)
+						|| name.equals(DeviceManagerImpl.MODULE_NAME)));
 	}
 
 	/**
@@ -406,39 +374,29 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 	 */
 	@Override
 	public boolean isCallbackOrderingPostreq(OFType type, String name) {
-		return true;  // Process before ALL other modules
+		return false;
 	}
 
 	@Override
 	public Command receive(IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
-		System.out.println("LoadBalancer RECEIVE called: " + msg.getType());
-
-		if (msg.getType() != OFType.PACKET_IN) {
+		System.out.println("PacketIn received");
+		if (msg.getType() != OFType.PACKET_IN)
 			return Command.CONTINUE;
-		}
 
 		OFPacketIn pktIn = (OFPacketIn) msg;
-		log.info("PacketIn received on port " + pktIn.getInPort());
 
 		Ethernet eth = new Ethernet();
 		eth.deserialize(pktIn.getPacketData(), 0, pktIn.getPacketData().length);
-		log.info("Packet type: 0x" + Integer.toHexString(eth.getEtherType() & 0xFFFF));
 
 		// ARP Handling
 		if (eth.getEtherType() == Ethernet.TYPE_ARP) {
-			log.info("Processing ARP packet");
 			ARP arp = (ARP) eth.getPayload();
-			log.info(String.format("ARP: opcode=%d, targetIP=%s",
-				arp.getOpCode(),
-				IPv4.fromIPv4Address(IPv4.toIPv4Address(arp.getTargetProtocolAddress()))));
-
 			int targetIp = IPv4.toIPv4Address(arp.getTargetProtocolAddress());
+
 			if (this.instances.containsKey(targetIp)) {
-				log.info("Found matching VIP instance");
 				LoadBalancerInstance instance = this.instances.get(targetIp);
 				byte[] vipMac = instance.getVirtualMAC();
 
-				// Build ARP reply
 				Ethernet ethReply = new Ethernet();
 				ethReply.setSourceMACAddress(vipMac);
 				ethReply.setDestinationMACAddress(eth.getSourceMACAddress());
@@ -456,15 +414,8 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 				arpReply.setTargetProtocolAddress(arp.getSenderProtocolAddress());
 
 				ethReply.setPayload(arpReply);
-
-				log.info(String.format("Sending ARP reply: VIP MAC=%s, target MAC=%s",
-					net.floodlightcontroller.util.MACAddress.valueOf(vipMac),
-					net.floodlightcontroller.util.MACAddress.valueOf(arp.getSenderHardwareAddress())));
-
 				SwitchCommands.sendPacket(sw, (short) pktIn.getInPort(), ethReply);
 				return Command.STOP;
-			} else {
-				log.info("No matching VIP instance found");
 			}
 
 			return Command.CONTINUE;

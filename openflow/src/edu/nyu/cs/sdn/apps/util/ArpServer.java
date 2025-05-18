@@ -1,4 +1,4 @@
-package edu.brown.cs.sdn.apps.util;
+package edu.nyu.cs.sdn.apps.util;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -30,21 +30,21 @@ import net.floodlightcontroller.util.MACAddress;
 public class ArpServer implements IFloodlightModule, IOFMessageListener
 {
 	public static final String MODULE_NAME = ArpServer.class.getSimpleName();
-	
+
 	// Interface to the logging system
     private static Logger log = LoggerFactory.getLogger(MODULE_NAME);
-    
+
 	// Interface to Floodlight core for interacting with connected switches
     private IFloodlightProviderService floodlightProv;
-    
+
     // Interface to device manager service
     private IDeviceService deviceProv;
 
 	@Override
 	public void init(FloodlightModuleContext context)
-			throws FloodlightModuleException 
+			throws FloodlightModuleException
 	{
-		log.info(String.format("Initializing %s...", MODULE_NAME));       
+		log.info(String.format("Initializing %s...", MODULE_NAME));
 		this.floodlightProv = context.getServiceImpl(
 				IFloodlightProviderService.class);
 		this.deviceProv = context.getServiceImpl(IDeviceService.class);
@@ -55,7 +55,7 @@ public class ArpServer implements IFloodlightModule, IOFMessageListener
      */
 	@Override
 	public void startUp(FloodlightModuleContext context)
-			throws FloodlightModuleException 
+			throws FloodlightModuleException
 	{
 		log.info(String.format("Starting %s...", MODULE_NAME));
 		this.floodlightProv.addOFMessageListener(OFType.PACKET_IN, this);
@@ -65,23 +65,23 @@ public class ArpServer implements IFloodlightModule, IOFMessageListener
      * Tell the module system which services we provide.
      */
 	@Override
-	public Collection<Class<? extends IFloodlightService>> getModuleServices() 
+	public Collection<Class<? extends IFloodlightService>> getModuleServices()
 	{ return null; }
 
 	/**
      * Tell the module system which services we implement.
      */
 	@Override
-	public Map<Class<? extends IFloodlightService>, IFloodlightService> 
-			getServiceImpls() 
+	public Map<Class<? extends IFloodlightService>, IFloodlightService>
+			getServiceImpls()
 	{ return null; }
 
 	/**
      * Tell the module system which modules we depend on.
      */
 	@Override
-	public Collection<Class<? extends IFloodlightService>> 
-			getModuleDependencies() 
+	public Collection<Class<? extends IFloodlightService>>
+			getModuleDependencies()
 	{
 		Collection<Class<? extends IFloodlightService >> floodlightService =
 	            new ArrayList<Class<? extends IFloodlightService>>();
@@ -95,7 +95,7 @@ public class ArpServer implements IFloodlightModule, IOFMessageListener
 	 * @return name for this module
 	 */
 	@Override
-	public String getName() 
+	public String getName()
 	{ return MODULE_NAME; }
 
 	/**
@@ -103,7 +103,7 @@ public class ArpServer implements IFloodlightModule, IOFMessageListener
 	 * notified of the event.
 	 */
 	@Override
-	public boolean isCallbackOrderingPrereq(OFType type, String name) 
+	public boolean isCallbackOrderingPrereq(OFType type, String name)
 	{ return false; }
 
 	/**
@@ -111,46 +111,46 @@ public class ArpServer implements IFloodlightModule, IOFMessageListener
 	 * been notified of the event.
 	 */
 	@Override
-	public boolean isCallbackOrderingPostreq(OFType type, String name) 
+	public boolean isCallbackOrderingPostreq(OFType type, String name)
 	{
-		return (OFType.PACKET_IN == type 
-				&& name.equals(DeviceManagerImpl.MODULE_NAME)); 
+		return (OFType.PACKET_IN == type
+				&& name.equals(DeviceManagerImpl.MODULE_NAME));
 	}
-	
+
 	/**
 	 * Handle incoming ARP packets.
 	 */
 	@Override
 	public net.floodlightcontroller.core.IListener.Command receive(
-			IOFSwitch sw, OFMessage msg, FloodlightContext cntx) 
+			IOFSwitch sw, OFMessage msg, FloodlightContext cntx)
 	{
 		// We only care about packet-in messages
 		if (msg.getType() != OFType.PACKET_IN)
 		{ return Command.CONTINUE; }
 		OFPacketIn pktIn = (OFPacketIn)msg;
-		
+
 		// We only care about ARP packets
 		Ethernet eth = new Ethernet();
 		eth.deserialize(pktIn.getPacketData(), 0, pktIn.getPacketData().length);
 		if (eth.getEtherType() != Ethernet.TYPE_ARP)
 		{ return Command.CONTINUE; }
 		ARP arp = (ARP)eth.getPayload();
-		
+
 		// We only care about ARP requests for IPv4 addresses
-		if (arp.getOpCode() != ARP.OP_REQUEST 
+		if (arp.getOpCode() != ARP.OP_REQUEST
 				|| arp.getProtocolType() != ARP.PROTO_TYPE_IP)
 		{ return Command.CONTINUE; }
-				
+
 		// See if we known about the device whose MAC address is being requested
 		int targetIP = IPv4.toIPv4Address(arp.getTargetProtocolAddress());
 		log.info(String.format("Received ARP request for %s from %s",
 				IPv4.fromIPv4Address(targetIP),
 				MACAddress.valueOf(arp.getSenderHardwareAddress()).toString()));
-		Iterator<? extends IDevice> deviceIterator = 
+		Iterator<? extends IDevice> deviceIterator =
 				this.deviceProv.queryDevices(null, null, targetIP, null, null);
 		if (!deviceIterator.hasNext())
 		{ return Command.CONTINUE; }
-		
+
 		// Create ARP reply
 		IDevice device = deviceIterator.next();
 		byte[] deviceMac = MACAddress.valueOf(device.getMACAddress()).toBytes();
@@ -161,13 +161,13 @@ public class ArpServer implements IFloodlightModule, IOFMessageListener
 		arp.setSenderProtocolAddress(IPv4.toIPv4AddressBytes(targetIP));
 		eth.setDestinationMACAddress(eth.getSourceMACAddress());
 		eth.setSourceMACAddress(deviceMac);
-		
+
 		// Send the ARP reply
 		log.info(String.format("Sending ARP reply %s->%s",
 				IPv4.fromIPv4Address(targetIP),
 				MACAddress.valueOf(deviceMac).toString()));
 		SwitchCommands.sendPacket(sw, (short)pktIn.getInPort(), eth);
-	
+
 		return Command.STOP;
 	}
 }
