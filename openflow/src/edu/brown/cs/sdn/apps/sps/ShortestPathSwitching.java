@@ -17,8 +17,6 @@ import org.slf4j.LoggerFactory;
 
 import org.openflow.protocol.OFMatch;
 import org.openflow.protocol.OFMessage;
-import org.openflow.protocol.OFPacketIn;
-import org.openflow.protocol.OFPort;
 import org.openflow.protocol.OFType;
 import org.openflow.protocol.action.OFAction;
 import org.openflow.protocol.action.OFActionOutput;
@@ -112,8 +110,13 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         // The ArpServer module will handle ARP requests
 
         // Install rules for any hosts that already exist
-        log.info("Looking for existing hosts...");
         Collection<? extends IDevice> devices = deviceProv.getAllDevices();
+
+        for (IDevice device : devices) {
+            log.info("Device MAC: " + device.getMACAddressString() +
+                    ", IPv4s: " + Arrays.toString(device.getIPv4Addresses()));
+        }
+
         for (IDevice device : devices) {
             Host host = new Host(device, this.floodlightProv);
             this.knownHosts.put(device, host);
@@ -130,34 +133,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
             }
         }
 
-        this.floodlightProv.addOFMessageListener(OFType.PACKET_IN, new IOFMessageListener() {
-            @Override
-            public String getName() {
-                return "ShortestPathSwitchingInlineLogger";
-            }
-
-            @Override
-            public boolean isCallbackOrderingPrereq(OFType type, String name) {
-                return false;
-            }
-
-            @Override
-            public boolean isCallbackOrderingPostreq(OFType type, String name) {
-                return false;
-            }
-
-            @Override
-            public net.floodlightcontroller.core.IListener.Command receive(
-                    IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
-
-                if (msg.getType() == OFType.PACKET_IN) {
-                    Ethernet eth = IFloodlightProviderService.bcStore.get(
-                            cntx, IFloodlightProviderService.CONTEXT_PI_PAYLOAD);
-                    System.out.println("[SPS Table 1 Logger] PACKET_IN: " + eth.toString());
-                }
-                return Command.CONTINUE;
-            }
-        });
+        installRulesForAllHosts();
 
     }
 
@@ -239,7 +215,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
                     neighbor = link.getSrc();
                     outPort = link.getDstPort();
                 } else {
-                    continue; // Link doesn't involve current switch
+                    continue;
                 }
 
                 // If we haven't visited the neighbor yet
@@ -298,7 +274,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
      * @return true if rules were successfully installed, false otherwise
      */
     private boolean installHostRules(Host host) {
-        if (!host.isAttachedToSwitch()) { // Skip if host is not attached to a switch
+        if (!host.isAttachedToSwitch()) {
             log.warn("Host " + host.getName() + " is not attached to a switch, skipping rule installation");
             return false;
         }
@@ -308,7 +284,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         IOFSwitch hostSwitch = host.getSwitch();
         int hostPort = host.getPort();
 
-        // Convert MAC address from long to byte array
+        // Convert MAC to bytes
         byte[] macBytes = new byte[6];
         long macAddress = host.getMACAddress();
         for (int i = 5; i >= 0; i--) {
@@ -316,110 +292,110 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
             macAddress >>= 8;
         }
 
-        // Create actions for the host's own switch
-        List<OFAction> hostActions = new ArrayList<OFAction>();
-        hostActions.add(new OFActionOutput((short) hostPort));
-        OFInstructionApplyActions hostInstruction = new OFInstructionApplyActions(hostActions);
-        List<OFInstruction> hostInstructions = new ArrayList<OFInstruction>();
-        hostInstructions.add(hostInstruction);
-
-        log.info("Resolved host port for " + host.getName() + ": " + hostPort + " (short: " + (short) hostPort + ")");
-        log.info("Created OFActionOutput for host " + host.getName() + ": port " + hostPort + " (short: "
-                + (short) hostPort + ")");
+        List<OFAction> actions = new ArrayList<OFAction>();
+        actions.add(new OFActionOutput((short) hostPort));
+        List<OFInstruction> instructions = new ArrayList<OFInstruction>();
+        instructions.add(new OFInstructionApplyActions(actions));
 
         boolean success = true;
 
-        // Always install a MAC-only rule (lower priority)
-        OFMatch macOnlyMatch = new OFMatch();
-        macOnlyMatch.setDataLayerDestination(macBytes);
-        log.info("Installing MAC-only rule for host " + host.getName() + " with MAC "
-                + macToString(host.getMACAddress()));
+        // MAC-based match
+        OFMatch macMatch = new OFMatch();
+        macMatch.setDataLayerDestination(macBytes);
 
-        // Install MAC-only rule on host's own switch
         success &= SwitchCommands.installRule(
                 hostSwitch,
                 this.table,
-                (short) (SwitchCommands.DEFAULT_PRIORITY - 1), // Lower priority
-                macOnlyMatch,
-                hostInstructions);
+                (short) (SwitchCommands.DEFAULT_PRIORITY - 1),
+                macMatch,
+                instructions);
+        log.info(String.format("MAC-only rule installed for host %s on its switch %d with port %d",
+                host.getName(), hostSwitch.getId(), hostPort));
 
-        if (!success) {
-            log.error("Failed to install MAC-only rule for host " + host.getName() + " on its own switch");
-        }
-
-        // If the host has an IP address, also install a higher-priority IP-based rule
+        // IP-based match
         if (host.getIPv4Address() != null) {
             OFMatch ipMatch = new OFMatch();
             ipMatch.setDataLayerType(Ethernet.TYPE_IPv4);
             ipMatch.setNetworkDestination(host.getIPv4Address());
-            // ipMatch.setNetworkProtocol((byte) 1); // ICMP only
-
-            log.info("Installing IP-based rule for host " + host.getName() + " with IP "
-                    + IPv4.fromIPv4Address(host.getIPv4Address()));
 
             success &= SwitchCommands.installRule(
                     hostSwitch,
                     this.table,
-                    SwitchCommands.DEFAULT_PRIORITY, // Higher priority
+                    SwitchCommands.DEFAULT_PRIORITY,
                     ipMatch,
-                    hostInstructions);
+                    instructions);
+            log.info(String.format("IP rule installed for host %s with IP %s on switch %d via port %d",
+                    host.getName(), IPv4.fromIPv4Address(host.getIPv4Address()),
+                    hostSwitch.getId(), hostPort));
 
-            if (!success) {
-                log.error("Failed to install IP-based rule for host " + host.getName() + " on its own switch");
-            }
+            // ARP match on local switch
+            OFMatch arpMatch = new OFMatch();
+            arpMatch.setDataLayerType(Ethernet.TYPE_ARP);
+
+            success &= SwitchCommands.installRule(
+                    hostSwitch,
+                    this.table,
+                    SwitchCommands.DEFAULT_PRIORITY,
+                    arpMatch,
+                    instructions);
+            log.info(String.format("ARP rule installed for host %s on switch %d via port %d",
+                    host.getName(), hostSwitch.getId(), hostPort));
         }
 
-        // For all other switches, compute shortest path and install rules
+        // Install on other switches
         for (IOFSwitch sw : getSwitches().values()) {
             if (sw.getId() == hostSwitch.getId())
                 continue;
 
             Map<Long, Integer> nextHops = computeShortestPaths(sw.getId(), hostSwitch.getId());
             if (!nextHops.containsKey(sw.getId())) {
-                log.warn("No path from switch " + sw.getId() + " to host " + host.getName() + ", skipping");
+                log.warn("No path from switch {} to host {}, skipping", sw.getId(), host.getName());
                 continue;
             }
 
             int outPort = nextHops.get(sw.getId());
+            List<OFAction> pathActions = new ArrayList<OFAction>();
+            pathActions.add(new OFActionOutput((short) outPort));
+            List<OFInstruction> pathInstructions = new ArrayList<OFInstruction>();
+            pathInstructions.add(new OFInstructionApplyActions(pathActions));
 
-            List<OFAction> actions = new ArrayList<OFAction>();
-            actions.add(new OFActionOutput((short) outPort));
-            OFInstructionApplyActions instruction = new OFInstructionApplyActions(actions);
-            List<OFInstruction> instructions = new ArrayList<OFInstruction>();
-            instructions.add(instruction);
-
-            log.info("Resolved output port on switch " + sw.getId() + " for host " + host.getName() + ": " + outPort
-                    + " (short: " + (short) outPort + ")");
-            log.info("Installing rules for host " + host.getName() + " on switch " + sw.getId());
-
+            // MAC rule
             success &= SwitchCommands.installRule(
                     sw,
                     this.table,
                     (short) (SwitchCommands.DEFAULT_PRIORITY - 1),
-                    macOnlyMatch,
-                    instructions);
-
-            if (!success) {
-                log.error("Failed to install MAC-only rule for host " + host.getName() + " on switch " + sw.getId());
-            }
+                    macMatch,
+                    pathInstructions);
+            log.info(String.format("MAC-only rule installed for host %s on switch %d via port %d",
+                    host.getName(), sw.getId(), outPort));
 
             if (host.getIPv4Address() != null) {
-                OFMatch ipMatch = new OFMatch();
-                ipMatch.setDataLayerType(Ethernet.TYPE_IPv4);
-                ipMatch.setNetworkDestination(host.getIPv4Address());
-                // ipMatch.setNetworkProtocol((byte) 1); // ICMP
+                // IP rule
+                OFMatch ipPathMatch = new OFMatch();
+                ipPathMatch.setDataLayerType(Ethernet.TYPE_IPv4);
+                ipPathMatch.setNetworkDestination(host.getIPv4Address());
 
                 success &= SwitchCommands.installRule(
                         sw,
                         this.table,
                         SwitchCommands.DEFAULT_PRIORITY,
-                        ipMatch,
-                        instructions);
+                        ipPathMatch,
+                        pathInstructions);
+                log.info(String.format("IP rule installed for host %s on switch %d via port %d",
+                        host.getName(), sw.getId(), outPort));
 
-                if (!success) {
-                    log.error(
-                            "Failed to install IP-based rule for host " + host.getName() + " on switch " + sw.getId());
-                }
+                // ARP rule
+                OFMatch arpPathMatch = new OFMatch();
+                arpPathMatch.setDataLayerType(Ethernet.TYPE_ARP);
+
+                success &= SwitchCommands.installRule(
+                        sw,
+                        this.table,
+                        SwitchCommands.DEFAULT_PRIORITY,
+                        arpPathMatch,
+                        pathInstructions);
+                log.info(String.format("ARP rule installed for host %s on switch %d via port %d",
+                        host.getName(), sw.getId(), outPort));
             }
         }
 
@@ -432,11 +408,14 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
      * @param host the host to remove rules for
      * @return true if rules were successfully removed, false otherwise
      */
-    private boolean removeHostRules(Host host) {
-        log.info("Removing rules for host {}", host.getName());
-        boolean success = true;
+    private void removeHostRules(Host host) {
+        if (!host.isAttachedToSwitch()) {
+            log.warn("Host {} is not attached to a switch, skipping rule removal", host.getName());
+            return;
+        }
 
-        // Convert MAC address from long to byte array
+        log.info("Removing rules for host {}", host.getName());
+
         byte[] macBytes = new byte[6];
         long macAddress = host.getMACAddress();
         for (int i = 5; i >= 0; i--) {
@@ -444,40 +423,32 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
             macAddress >>= 8;
         }
 
-        // Always remove MAC-only rule
-        OFMatch macOnlyMatch = new OFMatch();
-        macOnlyMatch.setDataLayerDestination(macBytes);
-        log.info(String.format("Installing MAC-only rule for host %s with MAC %s",
-                host.getName(), macToString(host.getMACAddress())));
+        // MAC match
+        OFMatch macMatch = new OFMatch();
+        macMatch.setDataLayerDestination(macBytes);
 
-        // Remove MAC-only rules from all switches
-        for (IOFSwitch sw : getSwitches().values()) {
-            boolean removed = SwitchCommands.removeRules(sw, this.table, macOnlyMatch);
-            if (!removed) {
-                log.error("Failed to remove MAC-only rule for host {} on switch {}", host.getName(), sw.getId());
-                success = false;
-            }
-        }
-
-        // If the host has an IP address, also remove IP-based rule
+        // IP match
+        OFMatch ipMatch = null;
         if (host.getIPv4Address() != null) {
-            OFMatch ipMatch = new OFMatch();
+            ipMatch = new OFMatch();
             ipMatch.setDataLayerType(Ethernet.TYPE_IPv4);
             ipMatch.setNetworkDestination(host.getIPv4Address());
-            log.info(String.format("Removing IP-based rule for host %s with IP %s",
-                    host.getName(), IPv4.fromIPv4Address(host.getIPv4Address())));
-
-            // Remove IP-based rules from all switches
-            for (IOFSwitch sw : getSwitches().values()) {
-                boolean removed = SwitchCommands.removeRules(sw, this.table, ipMatch);
-                if (!removed) {
-                    log.error("Failed to remove IP-based rule for host {} on switch {}", host.getName(), sw.getId());
-                    success = false;
-                }
-            }
         }
 
-        return success;
+        // ARP match
+        OFMatch arpMatch = new OFMatch();
+        arpMatch.setDataLayerType(Ethernet.TYPE_ARP);
+
+        // Remove from all switches
+        for (IOFSwitch sw : getSwitches().values()) {
+            SwitchCommands.removeRules(sw, this.table, macMatch);
+
+            if (ipMatch != null) {
+                SwitchCommands.removeRules(sw, this.table, ipMatch);
+            }
+
+            SwitchCommands.removeRules(sw, this.table, arpMatch);
+        }
     }
 
     /**
@@ -488,11 +459,9 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
     private boolean updateAllHostRules() {
         boolean success = true;
 
-        // First, remove all existing rules
+        // Remove all existing rules
         for (Host host : getHosts()) {
-            if (!removeHostRules(host)) {
-                success = false;
-            }
+            removeHostRules(host);
         }
 
         // Then, install new rules for all hosts
@@ -633,12 +602,13 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         }
     }
 
-    // Temporary rule to support ARP/initial discovery until hosts are identified
     private void installBootstrapDiscoveryRule(IOFSwitch sw) {
         OFMatch match = new OFMatch();
 
+        // send to controller
         List<OFAction> actions = new ArrayList<OFAction>();
-        actions.add(new OFActionOutput((short) 0xfffb));
+        actions.add(new OFActionOutput((short) 0xfffd, (short) 0xff));
+        actions.add(new OFActionOutput((short) 0xfffb, (short) 0xff));
 
         OFInstructionApplyActions instruction = new OFInstructionApplyActions(actions);
         List<OFInstruction> instructions = new ArrayList<OFInstruction>();
@@ -651,6 +621,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
                 match,
                 instructions);
     }
+
 
     /**
      * Event handler called when a host joins the network.
@@ -669,27 +640,31 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         // Add the host to our known hosts map
         this.knownHosts.put(device, host);
 
-        // If the host is attached to a switch, install rules for it
         if (host.isAttachedToSwitch()) {
+            log.info("Installing host rules for {} after deviceAdded event", host.getName());
+
+            boolean success = installHostRules(host);
+
+            log.info("Rules for host {} {} installed", host.getName(), success ? "successfully" : "failed to be");
+
+            // TEMPORARY fallback if IP exists now
             if (host.getIPv4Address() != null) {
-                log.info(String.format("Host %s added with IP %s",
-                        host.getName(), IPv4.fromIPv4Address(host.getIPv4Address())));
-            } else {
-                log.info(String.format("Host %s added without IP, installing MAC-based rules",
-                        host.getName()));
+                log.info("Host {} already has IP {}, re-installing with IP rules", host.getName(),
+                         IPv4.fromIPv4Address(host.getIPv4Address()));
+                installHostRules(host);
             }
 
-            // Update routing: add rules to route to new host
-            boolean success = installHostRules(host);
-            log.info(String.format("Rules for host %s %s installed",
-                    host.getName(), success ? "successfully" : "failed to be"));
-
-            // Ensure bidirectional connectivity with all other hosts
             ensureBidirectionalConnectivity();
-        } else {
+        }
+         else {
             log.info(String.format("Host %s is not attached to a switch, skipping rule installation",
                     host.getName()));
         }
+
+        if (host.getIPv4Address() != null) {
+            installHostRules(host);
+        }
+
     }
 
     /**
@@ -708,6 +683,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
                             host.getName(), macToString(host.getMACAddress())));
                 }
                 installHostRules(host);
+
             }
         }
     }
@@ -767,9 +743,17 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
     @Override
     public void switchAdded(long switchId) {
         IOFSwitch sw = this.floodlightProv.getSwitch(switchId);
-        log.info(String.format("Switch s%d added", switchId));
+        log.info("Switch s{} added", switchId);
 
         installBootstrapDiscoveryRule(sw);
+
+        // Proactively install rules for all known hosts
+        for (Host host : getHosts()) {
+            if (host.isAttachedToSwitch()) {
+                log.info("Installing rules for existing host {} on new switch", host.getName());
+                installHostRules(host);
+            }
+        }
     }
 
     /**
@@ -821,18 +805,21 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         this.knownHosts.put(device, host);
 
         if (host.getIPv4Address() != null && host.isAttachedToSwitch()) {
-            log.info("deviceIPV4AddrChanged: Installing rules for " + host.getName());
+            log.info("deviceIPV4AddrChanged: IP {} assigned to {}",
+                    IPv4.fromIPv4Address(host.getIPv4Address()), host.getName());
 
-            removeHostRules(host);
-            installHostRules(host);
+            removeHostRules(host); // Remove old MAC/IP rules
+            installHostRules(host); // Reinstall MAC + IP rules
 
-            // Ensure all hosts can reach this one and vice versa
+            // Also update rules on other switches to reach this host
             for (Host other : getHosts()) {
                 if (!other.equals(host) && other.isAttachedToSwitch()) {
                     ensureHostToHostConnectivity(other, host);
                     ensureHostToHostConnectivity(host, other);
                 }
             }
+        } else {
+            log.info("deviceIPV4AddrChanged: Host {} is not ready for rule installation", host.getName());
         }
     }
 
