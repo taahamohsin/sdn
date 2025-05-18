@@ -64,6 +64,8 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
     // Map of hosts to devices
     private Map<IDevice, Host> knownHosts;
 
+    private Map<Long, Set<Short>> treePorts = new HashMap<Long, Set<Short>>();
+
     /**
      * Loads dependencies and initializes data structures.
      */
@@ -102,6 +104,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         this.floodlightProv.addOFSwitchListener(this);
         this.linkDiscProv.addListener(this);
         this.deviceProv.addListener(this);
+        this.treePorts = computeSpanningTreePorts();
 
         // Note: We don't need to register as a packet-in listener
         // The ArpServer module will handle ARP requests
@@ -131,6 +134,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         }
 
         installRulesForAllHosts();
+        installFloodingRules();
 
     }
 
@@ -779,6 +783,7 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         }
 
         updateAllHostRules(); // Refresh routing
+        installFloodingRules();
     }
 
     /**
@@ -919,6 +924,118 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
         modules.add(ILinkDiscoveryService.class);
         modules.add(IDeviceService.class);
         return modules;
+    }
+
+    /**
+     * // Computes a loop-free set of output ports for each switch to enable safe
+     * flooding via a spanning tree
+     *
+     * @return The complete spanning tree port map
+     */
+    private Map<Long, Set<Short>> computeSpanningTreePorts() {
+        Map<Long, Set<Short>> treePorts = new HashMap<Long, Set<Short>>();
+        Map<Long, Set<Link>> adj = new HashMap<Long, Set<Link>>();
+
+        // Build adjacency list
+        for (Link link : getLinks()) {
+            Long src = link.getSrc();
+            Long dst = link.getDst();
+
+            if (!adj.containsKey(src)) {
+                adj.put(src, new HashSet<Link>());
+            }
+            adj.get(src).add(link);
+
+            if (!adj.containsKey(dst)) {
+                adj.put(dst, new HashSet<Link>());
+            }
+            adj.get(dst).add(link);
+        }
+
+        // Manually find the smallest switch ID
+        Long root = null;
+        for (Long swId : getSwitches().keySet()) {
+            if (root == null || swId.longValue() < root.longValue()) {
+                root = swId;
+            }
+        }
+
+        if (root == null) {
+            return treePorts; // No switches
+        }
+
+        Set<Long> visited = new HashSet<Long>();
+        Queue<Long> queue = new LinkedList<Long>();
+
+        visited.add(root);
+        queue.add(root);
+
+        while (!queue.isEmpty()) {
+            Long current = queue.poll();
+
+            if (!treePorts.containsKey(current)) {
+                treePorts.put(current, new HashSet<Short>());
+            }
+
+            Set<Link> neighbors = adj.get(current);
+            if (neighbors == null) {
+                continue;
+            }
+
+            for (Link link : neighbors) {
+                Long neighbor = (link.getSrc() == current.longValue()) ? link.getDst() : link.getSrc();
+
+                if (!visited.contains(neighbor)) {
+                    visited.add(neighbor);
+                    queue.add(neighbor);
+
+                    // Add port to current switch's set
+                    short outPort = (short) ((link.getSrc() == current.longValue()) ? link.getSrcPort()
+                            : link.getDstPort());
+                    treePorts.get(current).add(outPort);
+                }
+            }
+        }
+
+        return treePorts;
+    }
+
+    /*
+    * Install flooding rules on each switch using ports from a computed spanning
+    * tree
+    *
+    */
+    private void installFloodingRules() {
+        log.info("Installing flooding rules using spanning tree");
+
+        Map<Long, Set<Short>> treePorts = computeSpanningTreePorts();
+
+        for (Map.Entry<Long, Set<Short>> entry : treePorts.entrySet()) {
+            IOFSwitch sw = getSwitches().get(entry.getKey());
+            Set<Short> ports = entry.getValue();
+
+            List<OFAction> actions = new ArrayList<OFAction>();
+            for (Short port : ports) {
+                actions.add(new OFActionOutput(port));
+            }
+
+            OFInstructionApplyActions instruction = new OFInstructionApplyActions(actions);
+            List<OFInstruction> instructions = new ArrayList<OFInstruction>();
+            instructions.add(instruction);
+
+            // Match all broadcast Ethernet frames
+            OFMatch match = new OFMatch();
+            match.setDataLayerDestination(Ethernet.toMACAddress("ff:ff:ff:ff:ff:ff"));
+
+            SwitchCommands.installRule(
+                    sw,
+                    this.table,
+                    (short) 1, // Low priority for broadcast
+                    match,
+                    instructions);
+
+            log.info("Installed flood rule on s{} for ports {}", sw.getId(), ports);
+        }
     }
 
 }
