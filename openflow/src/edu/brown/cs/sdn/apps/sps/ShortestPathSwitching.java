@@ -636,30 +636,12 @@ public class ShortestPathSwitching implements IFloodlightModule, IOFSwitchListen
 
     /**
      * Install default rules on a switch:
-     * 1. Send ARP packets to the controller (highest priority)
-     * 2. Send all other packets to the controller (lowest priority)
+     * 1. Send all unmatched packets to flood (lowest priority)
      *
      * @param sw the switch to install default rules on
      */
     private void installDefaultRules(IOFSwitch sw) {
-        // Rule 1: ARP packets → Controller
-        OFMatch matchArp = new OFMatch();
-        matchArp.setDataLayerType(Ethernet.TYPE_ARP);
-
-        List<OFAction> arpActions = new ArrayList<OFAction>();
-        arpActions.add(new OFActionOutput(OFPort.OFPP_CONTROLLER.getValue()));
-        OFInstructionApplyActions arpInstruction = new OFInstructionApplyActions(arpActions);
-        List<OFInstruction> arpInstructions = new ArrayList<OFInstruction>();
-        arpInstructions.add(arpInstruction);
-
-        SwitchCommands.installRule(
-                sw,
-                this.table,
-                SwitchCommands.MAX_PRIORITY, // Highest priority for ARP
-                matchArp,
-                arpInstructions);
-
-        // Rule 2: Flood all unmatched packets (lowest priority fallback)
+        // Rule: Flood all unmatched packets (lowest priority fallback)
         OFMatch matchAll = new OFMatch(); // Match everything
 
         List<OFAction> floodActions = new ArrayList<OFAction>();
